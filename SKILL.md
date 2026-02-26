@@ -38,6 +38,10 @@ Ask the user what they want to name their pet if not specified.
 4. View Achievements
 python3 skills/crabpet/scripts/pet_engine.py achievements
 Lists all achievements: unlocked and locked.
+5. Daily Summary
+python3 skills/crabpet/scripts/pet_engine.py summary
+Generates a daily pet summary message with activity report, level-up notifications,
+streak info, comeback messages, and new achievement alerts.
 How XP is Calculated
 The engine reads memory/ directory daily log files:
 Each day with a log file = base XP (10 points)
@@ -142,8 +146,15 @@ comeback
 浪子回头
 Return after 14+ days absence
 🔄
+Comeback Messages
+When a user returns after absence, the summary command generates warm welcome-back messages:
+1-3 days: "主人！你总算回来了～" — immediate recovery
+3-7 days: "哼，你终于想起我了！...算了原谅你" — slight sulk then forgiveness
+7+ days: "(揉眼睛) ...主人？这不是在做梦吧！" — dramatic awakening
 File Locations
 Pet state: skills/crabpet/data/pet_state.json
 Generated cards: skills/crabpet/output/pet_card.png
-Sprite data: skills/crabpet/sprites/ (JSON pixel arrays)
+Sprite data: skills/crabpet/sprites/ (JSON pixel arrays for body, face, accessories, effects, scenes)
+Web visualization: skills/crabpet/web/index.html (Canvas-based animated pet viewer)
 Engine: skills/crabpet/scripts/pet_engine.py
+Tests: skills/crabpet/tests/test_pet_engine.py

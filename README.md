@@ -63,12 +63,17 @@ Just talk to your OpenClaw agent naturally:
 - "Show me my pet card" — generates a shareable pixel art card
 - "What achievements do I have?" — lists unlocked badges
 - "What's my pet's personality?" — detailed personality breakdown
+- "Give me a pet summary" — daily summary of pet activity
 
 ## Requirements
 
 - OpenClaw (any version with memory/ directory)
 - Python 3.8+
 - Optional: Pillow (`pip install Pillow`) for PNG pet card generation
+
+## Web Visualization
+
+Open `web/index.html` in a browser to see your pet rendered as an animated pixel art Canvas. You can load your `pet_state.json` file or try the built-in demo mode.
 
 ## Pet Card
 
@@ -100,6 +105,16 @@ crabpet/
 │   └── pet_engine.py        # Core engine (XP, personality, mood, card gen)
 ├── references/
 │   └── personality.md       # Personality system documentation
+├── sprites/                 # Pixel art sprite data (JSON)
+│   ├── body/                # Body sprites for each growth stage
+│   ├── face/                # Face expressions (happy, sleepy, bored, excited)
+│   ├── accessories/         # Personality-based accessories
+│   ├── effects/             # Visual effects (sparkle, zzz, cobweb, ice, dust)
+│   └── scenes/              # Background scenes (desk, sofa, bed)
+├── web/
+│   └── index.html           # Canvas-based pet visualization
+├── tests/
+│   └── test_pet_engine.py   # Unit tests
 ├── data/
 │   └── pet_state.json       # Your pet's saved state (auto-generated)
 └── output/

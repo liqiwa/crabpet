@@ -7,12 +7,14 @@ Usage:
     python3 pet_engine.py status
     python3 pet_engine.py card
     python3 pet_engine.py achievements
+    python3 pet_engine.py summary
 """
 
 import json
 import os
 import sys
 import math
+import random
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -248,6 +250,19 @@ MOOD_MESSAGES = {
     "hibernating": "zzZ... zzZ... 😴🕸️🦞",
     "dusty":       "这里好安静啊... 🏚️🦞",
     "frozen":      "...... ❄️🦞",
+}
+
+COMEBACK_MESSAGES = {
+    "short": "主人！你总算回来了～ 🦞✨",
+    "medium": "哼，你终于想起我了！...算了原谅你 🦞💢→💕",
+    "long": "(揉眼睛) ...主人？这不是在做梦吧！ 🦞😭",
+}
+
+STAGE_LABELS = {
+    "baby":   "🥚 幼虾期",
+    "teen":   "🦐 成长期",
+    "adult":  "🦞 成熟期",
+    "legend": "👑 传说期",
 }
 
 
@@ -678,15 +693,131 @@ def cmd_card():
     return result
 
 
+def get_comeback_message(prev_absent, current_absent):
+    """Generate a comeback message if the user returns after absence."""
+    if current_absent > 1 or prev_absent < 1:
+        return None
+
+    if prev_absent <= 3:
+        return COMEBACK_MESSAGES["short"]
+    elif prev_absent <= 7:
+        return COMEBACK_MESSAGES["medium"]
+    else:
+        return COMEBACK_MESSAGES["long"]
+
+
+def load_sprite(category, name):
+    """Load a sprite JSON file from the sprites directory."""
+    sprite_file = SPRITES_DIR / category / f"{name}.json"
+    if sprite_file.exists():
+        return json.loads(sprite_file.read_text())
+    return None
+
+
+def cmd_summary():
+    """Generate a daily pet summary message."""
+    if not STATE_FILE.exists():
+        cmd_init()
+
+    state = json.loads(STATE_FILE.read_text())
+    logs = scan_memory_logs()
+
+    # Get today's log
+    today = datetime.now().date()
+    today_logs = [l for l in logs if l["date"] == today]
+    yesterday_logs = [l for l in logs if l["date"] == today - timedelta(days=1)]
+
+    # Calculate current stats
+    total_xp = calculate_xp(logs)
+    level = xp_to_level(total_xp)
+    old_level = state.get("level", 1)
+    streak = calculate_streak(logs)
+    personality = calculate_personality(logs)
+    primary_pers = get_primary_personality(personality)
+    mood, days_absent = calculate_mood(logs)
+    stage = level_to_stage(level)
+
+    # Check for comeback
+    prev_absent = state.get("days_absent", 0)
+    comeback_msg = get_comeback_message(prev_absent, days_absent)
+
+    # Build summary parts
+    parts = []
+
+    if comeback_msg:
+        parts.append(comeback_msg)
+
+    pet_name = state.get("name", "CrabPet")
+
+    if today_logs:
+        chars_today = sum(l["chars"] for l in today_logs)
+        xp_today = sum(10 + min(l["chars"] // 100, 50) for l in today_logs)
+
+        # Personality flavor for activity description
+        activity_map = {
+            "coder": "写代码",
+            "writer": "写文章",
+            "analyst": "分析数据",
+            "creative": "搞设计",
+            "hustle": "疯狂输出",
+            "neutral": "和 AI 聊天",
+        }
+        activity = activity_map.get(primary_pers, "和 AI 聊天")
+        parts.append(f"今天主人{activity}，{pet_name} 获得了 {xp_today} 经验值！")
+
+        if level > old_level:
+            parts.append(f"🎉 升级了！{pet_name} 现在是 Lv.{level} ({STAGE_LABELS.get(stage, stage)})！")
+    elif yesterday_logs:
+        parts.append(f"{pet_name} 等了一天了，主人今天来陪我吧～ 🦞")
+    else:
+        parts.append(f"{MOOD_MESSAGES.get(mood, '...')}")
+
+    if streak > 1:
+        parts.append(f"连续打卡 {streak} 天 🔥")
+
+    # Check for new achievements
+    achievements = check_achievements(state, logs, streak)
+    old_achievements = set(state.get("achievements", []))
+    new_achievements = set(achievements) - old_achievements
+    if new_achievements:
+        for a in new_achievements:
+            if a in ACHIEVEMENTS:
+                parts.append(f"🏅 解锁成就「{ACHIEVEMENTS[a]['emoji']} {ACHIEVEMENTS[a]['name']}」！")
+
+    summary_text = "\n".join(parts)
+
+    result = {
+        "action": "summary",
+        "pet_name": pet_name,
+        "level": level,
+        "level_up": level > old_level,
+        "streak": streak,
+        "mood": mood,
+        "summary": summary_text,
+    }
+
+    if comeback_msg:
+        result["comeback"] = True
+        result["comeback_message"] = comeback_msg
+
+    if new_achievements:
+        result["new_achievements"] = [
+            {"id": a, **ACHIEVEMENTS[a]} for a in new_achievements if a in ACHIEVEMENTS
+        ]
+
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return result
+
+
 # ─── Main ────────────────────────────────────────────────────────────────
 
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({"error": "Usage: pet_engine.py <init|status|card|achievements> [--name NAME]"}))
+        print(json.dumps({"error": "Usage: pet_engine.py <init|status|card|achievements|summary> [--name NAME]"}))
         sys.exit(1)
-    
+
     command = sys.argv[1].lower()
-    
+
     if command == "init":
         name = "CrabPet"
         if "--name" in sys.argv:
@@ -694,16 +825,19 @@ def main():
             if idx + 1 < len(sys.argv):
                 name = sys.argv[idx + 1]
         cmd_init(name)
-    
+
     elif command == "status":
         cmd_status()
-    
+
     elif command == "card":
         cmd_card()
-    
+
     elif command == "achievements":
         cmd_achievements()
-    
+
+    elif command == "summary":
+        cmd_summary()
+
     else:
         print(json.dumps({"error": f"Unknown command: {command}"}))
         sys.exit(1)
