@@ -5,7 +5,9 @@ CrabPet Engine — Reads OpenClaw memory logs and computes pet state.
 Usage:
     python3 pet_engine.py init --name "MyLobster"
     python3 pet_engine.py status
-    python3 pet_engine.py card
+    python3 pet_engine.py card          # generates txt + md + png (if Pillow available)
+    python3 pet_engine.py card-text     # text card only
+    python3 pet_engine.py card-md       # markdown card only
     python3 pet_engine.py achievements
     python3 pet_engine.py summary
 """
@@ -16,6 +18,7 @@ import sys
 import math
 import random
 import re
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -234,6 +237,16 @@ PERSONALITY_LABELS = {
     "neutral": "🦞 萌新虾",
 }
 
+# Text-only labels for PNG card rendering (no emoji, avoids font issues)
+PERSONALITY_LABELS_TEXT = {
+    "coder": "技术宅",
+    "writer": "文艺虾",
+    "analyst": "学霸虾",
+    "creative": "创意虾",
+    "hustle": "卷王虾",
+    "neutral": "萌新虾",
+}
+
 MOOD_LABELS = {
     "energetic":   "✨ 精力充沛",
     "bored":       "😴 有点无聊",
@@ -241,6 +254,15 @@ MOOD_LABELS = {
     "hibernating": "😪 冬眠中",
     "dusty":       "🏚️ 蒙尘",
     "frozen":      "❄️ 冰封",
+}
+
+MOOD_LABELS_TEXT = {
+    "energetic":   "精力充沛",
+    "bored":       "有点无聊",
+    "slacking":    "摸鱼模式",
+    "hibernating": "冬眠中",
+    "dusty":       "蒙尘",
+    "frozen":      "冰封",
 }
 
 MOOD_MESSAGES = {
@@ -528,17 +550,9 @@ def cmd_achievements():
     return result
 
 
-def cmd_card():
-    """Generate a pet card image (text-based fallback if Pillow not available)."""
-    # Get current status first
-    if not STATE_FILE.exists():
-        cmd_init()
-    
-    state = json.loads(STATE_FILE.read_text())
-    
-    # Try to update status
+def _gather_card_data(state):
+    """Gather all data needed for card rendering."""
     try:
-        import io
         logs = scan_memory_logs()
         total_xp = calculate_xp(logs)
         level = xp_to_level(total_xp)
@@ -546,149 +560,405 @@ def cmd_card():
         primary_pers = get_primary_personality(personality)
         mood, days_absent = calculate_mood(logs)
     except Exception:
+        total_xp = state.get("xp", 0)
         level = state.get("level", 1)
         primary_pers = state.get("primary_personality", "neutral")
         mood = state.get("mood", "energetic")
         days_absent = state.get("days_absent", 0)
-    
+        personality = state.get("personality", {})
+
+    name = state.get("name", "CrabPet")
+    streak = state.get("stats", {}).get("streak_days", 0)
+    total_days = state.get("stats", {}).get("total_log_days", 0)
+    born = state.get("born", "???")
+    xp_next = (level + 1) ** 2 * 10
+    stage = level_to_stage(level)
+    unlocked = state.get("achievements", [])
+
+    return {
+        "name": name,
+        "level": level,
+        "xp": total_xp,
+        "xp_next": xp_next,
+        "stage": stage,
+        "primary_pers": primary_pers,
+        "pers_label": PERSONALITY_LABELS.get(primary_pers, "🦞 萌新虾"),
+        "pers_label_text": PERSONALITY_LABELS_TEXT.get(primary_pers, "萌新虾"),
+        "mood": mood,
+        "mood_label": MOOD_LABELS.get(mood, "..."),
+        "mood_label_text": MOOD_LABELS_TEXT.get(mood, "..."),
+        "stage_label": STAGE_LABELS.get(stage, "🦞"),
+        "streak": streak,
+        "total_days": total_days,
+        "born": born,
+        "days_absent": days_absent,
+        "personality": personality,
+        "achievements": unlocked,
+        "last_updated": state.get("last_updated", ""),
+    }
+
+
+def _generate_text_card(data):
+    """Generate a plain-text pet card (always works, no dependencies)."""
+    # ASCII art crab that changes with mood
+    if data["mood"] == "frozen":
+        crab_art = [
+            "        ,,    ,,        ",
+            "       (  *  *  )       ",
+            "    ~~~~~~~~~~~~~~~     ",
+            "    | ❄ FROZEN ❄ |     ",
+            "    ~~~~~~~~~~~~~~~     ",
+        ]
+    elif data["mood"] in ("dusty", "hibernating"):
+        crab_art = [
+            "       .  zZz  .        ",
+            "       (  -  -  )       ",
+            "    ~~~~~~~~~~~~~~~     ",
+            "    |  . . . . .  |     ",
+            "    ~~~~~~~~~~~~~~~     ",
+        ]
+    else:
+        crab_art = [
+            "        ,,    ,,        ",
+            "       (  o  o  )       ",
+            "    ~~~~~~~~~~~~~~~     ",
+            "    |    ^    ^    |    ",
+            "    ~~~~~~~~~~~~~~~     ",
+        ]
+
+    xp_pct = int(data["xp"] / data["xp_next"] * 100) if data["xp_next"] > 0 else 0
+    xp_bar_filled = xp_pct // 5
+    xp_bar = "█" * xp_bar_filled + "░" * (20 - xp_bar_filled)
+
+    ach_list = data["achievements"]
+    ach_lines = []
+    for aid in ach_list:
+        if aid in ACHIEVEMENTS:
+            a = ACHIEVEMENTS[aid]
+            ach_lines.append("  {emoji} {name}".format(**a))
+
+    card = """
+╔══════════════════════════════════════╗
+║         🦞 CRABPET CARD 🦞          ║
+╠══════════════════════════════════════╣
+║                                      ║
+{crab}
+║                                      ║
+║   名称: {name}
+║   等级: Lv.{level}  ({stage_label})
+║   类型: {pers_label}
+║   心情: {mood_label}
+║                                      ║
+║   经验: [{xp_bar}] {xp_pct}%
+║         {xp}/{xp_next} XP
+║                                      ║
+║   活跃天数: {total_days}   连续打卡: {streak}
+║   出生日期: {born}
+║                                      ║
+║   --- 成就 ({ach_count}/{ach_total}) ---
+{ach_section}
+║                                      ║
+║   clawhub install crabpet            ║
+╚══════════════════════════════════════╝
+""".format(
+        crab="\n".join("║" + line for line in crab_art),
+        name=data["name"],
+        level=data["level"],
+        stage_label=data["stage_label"],
+        pers_label=data["pers_label"],
+        mood_label=data["mood_label"],
+        xp_bar=xp_bar,
+        xp_pct=xp_pct,
+        xp=data["xp"],
+        xp_next=data["xp_next"],
+        total_days=data["total_days"],
+        streak=data["streak"],
+        born=data["born"],
+        ach_count=len(ach_list),
+        ach_total=len(ACHIEVEMENTS),
+        ach_section="\n".join("║" + line for line in ach_lines) if ach_lines else "║   (暂无)",
+    ).strip()
+
+    return card
+
+
+def _generate_md_card(data):
+    """Generate a Markdown-formatted pet card."""
+    xp_pct = int(data["xp"] / data["xp_next"] * 100) if data["xp_next"] > 0 else 0
+    xp_bar_filled = xp_pct // 5
+    xp_bar = "█" * xp_bar_filled + "░" * (20 - xp_bar_filled)
+
+    # Personality radar
+    pers = data["personality"]
+    pers_lines = []
+    dim_names = {"coder": "技术", "writer": "文艺", "analyst": "学术", "creative": "创意", "hustle": "勤奋"}
+    for key in ["coder", "writer", "analyst", "creative", "hustle"]:
+        val = pers.get(key, 0.0)
+        bar_len = int(val * 10)
+        bar = "▓" * bar_len + "░" * (10 - bar_len)
+        pers_lines.append("| {name} | `{bar}` | {val:.1f} |".format(
+            name=dim_names.get(key, key), bar=bar, val=val))
+
+    # Achievements table
+    ach_list = data["achievements"]
+    ach_lines = []
+    for aid in ach_list:
+        if aid in ACHIEVEMENTS:
+            a = ACHIEVEMENTS[aid]
+            ach_lines.append("| {emoji} | {name} | {desc} |".format(**a))
+
+    card = """# 🦞 CrabPet 宠物卡片
+
+---
+
+## 📋 基本信息
+
+| 属性 | 值 |
+|------|-----|
+| 名称 | **{name}** |
+| 等级 | **Lv.{level}** {stage_label} |
+| 类型 | {pers_label} |
+| 心情 | {mood_label} |
+| 出生 | {born} |
+
+## 📊 经验值
+
+`{xp_bar}` **{xp_pct}%** ({xp}/{xp_next} XP)
+
+## 📈 活跃数据
+
+| 指标 | 值 |
+|------|-----|
+| 活跃天数 | {total_days} 天 |
+| 连续打卡 | {streak} 天 |
+
+## 🧠 个性雷达
+
+| 维度 | 分布 | 数值 |
+|------|------|------|
+{pers_radar}
+
+## 🏆 成就 ({ach_count}/{ach_total})
+
+| 图标 | 名称 | 说明 |
+|------|------|------|
+{ach_table}
+
+---
+
+> `clawhub install crabpet` | 最后更新: {last_updated}
+""".format(
+        name=data["name"],
+        level=data["level"],
+        stage_label=data["stage_label"],
+        pers_label=data["pers_label"],
+        mood_label=data["mood_label"],
+        born=data["born"],
+        xp_bar=xp_bar,
+        xp_pct=xp_pct,
+        xp=data["xp"],
+        xp_next=data["xp_next"],
+        total_days=data["total_days"],
+        streak=data["streak"],
+        pers_radar="\n".join(pers_lines),
+        ach_count=len(ach_list),
+        ach_total=len(ACHIEVEMENTS),
+        ach_table="\n".join(ach_lines) if ach_lines else "| - | 暂无成就 | - |",
+        last_updated=data["last_updated"],
+    ).strip()
+
+    return card
+
+
+def _generate_png_card(data, output_path):
+    """Generate a PNG pet card. Requires Pillow. Returns True on success."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    W, H = 400, 500
+    img = Image.new("RGB", (W, H), "#0d0d1a")
+    draw = ImageDraw.Draw(img)
+
+    # Border
+    draw.rectangle([2, 2, W-3, H-3], outline="#FF6B4A", width=2)
+
+    # Header
+    draw.rectangle([0, 0, W, 60], fill="#111128")
+
+    # Font loading: prefer CJK fonts, with cross-platform fallback
+    CJK_FONT_PATHS = [
+        # macOS
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        # Linux
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    ]
+    LATIN_FONT_PATHS = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    ]
+
+    def find_font(paths, size):
+        for p in paths:
+            try:
+                return ImageFont.truetype(p, size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    font_title = find_font(CJK_FONT_PATHS + LATIN_FONT_PATHS, 20)
+    font_body = find_font(CJK_FONT_PATHS + LATIN_FONT_PATHS, 14)
+    font_small = find_font(CJK_FONT_PATHS + LATIN_FONT_PATHS, 11)
+
+    draw.text((W//2, 30), "CRABPET CARD", fill="#FF6B4A", font=font_title, anchor="mm")
+
+    # Pet sprite area (simplified pixel art)
+    sprite_y = 80
+    sprite_size = 8
+    crab_pixels = [
+        "..RR....RR..",
+        "..RR....RR..",
+        ".RRRR.RRRR..",
+        ".ROOORROOR..",
+        ".ROOOOOOOR..",
+        ".ROWOOOWOR..",
+        ".ROOOOOOOR..",
+        ".ROOMMMOOR..",
+        "..RRRRRRRR..",
+        ".RR.RR.RR...",
+    ]
+    color_map = {"R": "#D4432F", "O": "#FF7B54", "W": "#FFFFFF", "M": "#FF4757"}
+
+    if data["mood"] == "frozen":
+        color_map = {"R": "#5B9BD5", "O": "#A0C4E8", "W": "#E8E8E8", "M": "#7BB8DE"}
+    elif data["mood"] in ("dusty", "hibernating"):
+        color_map = {"R": "#6B5B4F", "O": "#8B7B6F", "W": "#CCCCCC", "M": "#7B6B5F"}
+
+    cx = W // 2 - len(crab_pixels[0]) * sprite_size // 2
+    for row_idx, row in enumerate(crab_pixels):
+        for col_idx, ch in enumerate(row):
+            if ch in color_map:
+                x = cx + col_idx * sprite_size
+                y = sprite_y + row_idx * sprite_size
+                draw.rectangle([x, y, x + sprite_size - 1, y + sprite_size - 1], fill=color_map[ch])
+
+    # Pet name and info
+    info_y = sprite_y + len(crab_pixels) * sprite_size + 20
+    draw.text((W//2, info_y), data["name"], fill="#FF6B4A", font=font_title, anchor="mm")
+    info_y += 30
+
+    draw.text((W//2, info_y), "Lv.{level}  |  {pers}".format(
+        level=data["level"], pers=data["pers_label_text"]), fill="#CCCCCC", font=font_body, anchor="mm")
+    info_y += 25
+    draw.text((W//2, info_y), data["mood_label_text"], fill="#999999", font=font_body, anchor="mm")
+    info_y += 35
+
+    # Stats box
+    draw.rectangle([30, info_y, W-30, info_y + 80], fill="#111128", outline="#222222")
+    stats_items = [
+        ("Days: {0}".format(data["total_days"]), 100),
+        ("Streak: {0}d".format(data["streak"]), 200),
+        ("XP: {0}".format(data["xp"]), 300),
+    ]
+    for text, x in stats_items:
+        draw.text((x, info_y + 40), text, fill="#FF6B4A", font=font_body, anchor="mm")
+
+    info_y += 100
+
+    # Achievements
+    ach_names = [ACHIEVEMENTS[a]["name"] for a in data["achievements"] if a in ACHIEVEMENTS]
+    if ach_names:
+        ach_text = " | ".join(ach_names[:4])
+        draw.text((W//2, info_y), ach_text, fill="#FFFFFF", font=font_body, anchor="mm")
+        if len(ach_names) > 4:
+            info_y += 20
+            draw.text((W//2, info_y), "+{0} more".format(len(ach_names) - 4),
+                       fill="#666666", font=font_small, anchor="mm")
+
+    # Footer
+    draw.rectangle([30, H - 50, W - 30, H - 15], outline="#333333")
+    draw.text((W//2, H - 32), "clawhub install crabpet", fill="#FF6B4A", font=font_small, anchor="mm")
+
+    img.save(str(output_path), "PNG")
+    return True
+
+
+def cmd_card():
+    """Generate pet cards in multiple formats (txt, md, and optionally png)."""
+    if not STATE_FILE.exists():
+        cmd_init()
+
+    state = json.loads(STATE_FILE.read_text())
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    card_path = OUTPUT_DIR / "pet_card.png"
-    
+
+    # Gather card data
+    data = _gather_card_data(state)
+
+    # Always generate text and markdown cards
+    txt_path = OUTPUT_DIR / "pet_card_simple.txt"
+    md_path = OUTPUT_DIR / "pet_card_pretty.md"
+
+    txt_content = _generate_text_card(data)
+    md_content = _generate_md_card(data)
+
+    txt_path.write_text(txt_content, encoding="utf-8")
+    md_path.write_text(md_content, encoding="utf-8")
+
+    result = {
+        "action": "card",
+        "cards": {
+            "txt": str(txt_path),
+            "md": str(md_path),
+        },
+        "card_text": txt_content,
+        "share_text": "My AI pet {name} is Lv.{level}, {pers}! Get yours: clawhub install crabpet".format(
+            name=data["name"], level=data["level"], pers=data["pers_label_text"]),
+    }
+
+    # Try PNG generation (bonus, requires Pillow)
+    png_path = OUTPUT_DIR / "pet_card.png"
     try:
-        from PIL import Image, ImageDraw, ImageFont
-        
-        # Card dimensions
-        W, H = 400, 500
-        img = Image.new("RGB", (W, H), "#0d0d1a")
-        draw = ImageDraw.Draw(img)
-        
-        # Border
-        draw.rectangle([2, 2, W-3, H-3], outline="#FF6B4A", width=2)
-        
-        # Header
-        draw.rectangle([0, 0, W, 60], fill="#111128")
-        try:
-            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 20)
-            font_body = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 11)
-        except OSError:
-            font_title = ImageFont.load_default()
-            font_body = ImageFont.load_default()
-            font_small = ImageFont.load_default()
-        
-        draw.text((W//2, 30), f"CRABPET CARD", fill="#FF6B4A", font=font_title, anchor="mm")
-        
-        # Pet sprite area (simplified pixel art)
-        sprite_y = 80
-        sprite_size = 8
-        # Draw a simple pixel crab
-        crab_pixels = [
-            "..RR....RR..",
-            "..RR....RR..",
-            ".RRRR.RRRR..",
-            ".ROOORROOR..",
-            ".ROOOOOOOR..",
-            ".ROWOOOWOR..",
-            ".ROOOOOOOR..",
-            ".ROOMMMOOR..",
-            "..RRRRRRRR..",
-            ".RR.RR.RR...",
-        ]
-        color_map = {"R": "#D4432F", "O": "#FF7B54", "W": "#FFFFFF", "M": "#FF4757"}
-        
-        if mood == "frozen":
-            color_map = {"R": "#5B9BD5", "O": "#A0C4E8", "W": "#E8E8E8", "M": "#7BB8DE"}
-        elif mood in ("dusty", "hibernating"):
-            color_map = {"R": "#6B5B4F", "O": "#8B7B6F", "W": "#CCCCCC", "M": "#7B6B5F"}
-        
-        cx = W // 2 - len(crab_pixels[0]) * sprite_size // 2
-        for row_idx, row in enumerate(crab_pixels):
-            for col_idx, ch in enumerate(row):
-                if ch in color_map:
-                    x = cx + col_idx * sprite_size
-                    y = sprite_y + row_idx * sprite_size
-                    draw.rectangle([x, y, x + sprite_size - 1, y + sprite_size - 1], fill=color_map[ch])
-        
-        # Pet name and info
-        info_y = sprite_y + len(crab_pixels) * sprite_size + 20
-        name = state.get("name", "CrabPet")
-        pers_label = PERSONALITY_LABELS.get(primary_pers, "Neutral")
-        mood_label = MOOD_LABELS.get(mood, "...")
-        streak = state.get("stats", {}).get("streak_days", 0)
-        total_days = state.get("stats", {}).get("total_log_days", 0)
-        born = state.get("born", "???")
-        
-        draw.text((W//2, info_y), name, fill="#FF6B4A", font=font_title, anchor="mm")
-        info_y += 30
-        
-        draw.text((W//2, info_y), f"Lv.{level}  |  {pers_label}", fill="#CCCCCC", font=font_body, anchor="mm")
-        info_y += 25
-        draw.text((W//2, info_y), f"{mood_label}", fill="#999999", font=font_body, anchor="mm")
-        info_y += 35
-        
-        # Stats box
-        draw.rectangle([30, info_y, W-30, info_y + 80], fill="#111128", outline="#222222")
-        stats_items = [
-            (f"Days: {total_days}", 100),
-            (f"Streak: {streak}d", 200),
-            (f"XP: {state.get('xp', 0)}", 300),
-        ]
-        for text, x in stats_items:
-            draw.text((x, info_y + 40), text, fill="#FF6B4A", font=font_body, anchor="mm")
-        
-        info_y += 100
-        
-        # Achievements
-        unlocked = state.get("achievements", [])
-        ach_text = " ".join(ACHIEVEMENTS[a]["emoji"] for a in unlocked if a in ACHIEVEMENTS)
-        if ach_text:
-            draw.text((W//2, info_y), ach_text, fill="#FFFFFF", font=font_title, anchor="mm")
-        
-        info_y += 40
-        
-        # Footer
-        draw.rectangle([30, H - 50, W - 30, H - 15], outline="#333333")
-        draw.text((W//2, H - 32), "clawhub install crabpet", fill="#FF6B4A", font=font_small, anchor="mm")
-        
-        # Save
-        img.save(str(card_path), "PNG")
-        
-        result = {
-            "action": "card",
-            "card_path": str(card_path),
-            "message": f"Pet card generated at {card_path}",
-            "share_text": f"My AI pet {name} is Lv.{level}, personality: {pers_label}! Get yours: clawhub install crabpet",
-        }
-    
-    except ImportError:
-        # Pillow not installed — generate text card
-        card_text = f"""
-╔══════════════════════════════════╗
-║       🦞 CRABPET CARD 🦞        ║
-╠══════════════════════════════════╣
-║                                  ║
-║   Name: {state.get('name', 'CrabPet'):<24s}║
-║   Level: {level:<23d}║
-║   Type: {PERSONALITY_LABELS.get(primary_pers, '🦞'):<24s}║
-║   Mood: {MOOD_LABELS.get(mood, '...'):<24s}║
-║                                  ║
-║   Streak: {state.get('stats',{}).get('streak_days',0)} days{' ' * 18}║
-║   Total:  {state.get('stats',{}).get('total_log_days',0)} days{' ' * 18}║
-║                                  ║
-║   clawhub install crabpet        ║
-╚══════════════════════════════════╝
-"""
-        card_path = OUTPUT_DIR / "pet_card.txt"
-        card_path.write_text(card_text)
-        
-        result = {
-            "action": "card",
-            "card_path": str(card_path),
-            "fallback": "text",
-            "message": "Pillow not installed. Generated text card. Install Pillow for PNG: pip install Pillow",
-            "card_text": card_text,
-        }
-    
+        _generate_png_card(data, png_path)
+        result["cards"]["png"] = str(png_path)
+        result["message"] = "Pet cards generated: txt, md, png"
+    except (ImportError, Exception) as e:
+        result["png_error"] = str(e)
+        result["message"] = "Pet cards generated: txt, md (PNG skipped: {0})".format(str(e)[:60])
+
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return result
+
+
+def cmd_card_single(fmt):
+    """Generate a single-format card (txt or md)."""
+    if not STATE_FILE.exists():
+        cmd_init()
+
+    state = json.loads(STATE_FILE.read_text())
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    data = _gather_card_data(state)
+
+    if fmt == "txt":
+        content = _generate_text_card(data)
+        out_path = OUTPUT_DIR / "pet_card_simple.txt"
+    else:
+        content = _generate_md_card(data)
+        out_path = OUTPUT_DIR / "pet_card_pretty.md"
+
+    out_path.write_text(content, encoding="utf-8")
+
+    result = {
+        "action": "card",
+        "format": fmt,
+        "card_path": str(out_path),
+        "message": "Pet card ({0}) generated at {1}".format(fmt, out_path),
+    }
+    if fmt == "txt":
+        result["card_text"] = content
+
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return result
 
@@ -831,6 +1101,12 @@ def main():
 
     elif command == "card":
         cmd_card()
+
+    elif command == "card-text":
+        cmd_card_single("txt")
+
+    elif command == "card-md":
+        cmd_card_single("md")
 
     elif command == "achievements":
         cmd_achievements()
