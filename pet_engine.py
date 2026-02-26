@@ -1,0 +1,713 @@
+#!/usr/bin/env python3
+"""
+CrabPet Engine — Reads OpenClaw memory logs and computes pet state.
+
+Usage:
+    python3 pet_engine.py init --name "MyLobster"
+    python3 pet_engine.py status
+    python3 pet_engine.py card
+    python3 pet_engine.py achievements
+"""
+
+import json
+import os
+import sys
+import math
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# ─── Paths ───────────────────────────────────────────────────────────────
+
+SCRIPT_DIR = Path(__file__).parent.resolve()
+SKILL_DIR = SCRIPT_DIR.parent
+DATA_DIR = SKILL_DIR / "data"
+OUTPUT_DIR = SKILL_DIR / "output"
+SPRITES_DIR = SKILL_DIR / "sprites"
+
+STATE_FILE = DATA_DIR / "pet_state.json"
+
+# OpenClaw workspace — try standard locations
+WORKSPACE_CANDIDATES = [
+    Path.home() / ".openclaw" / "workspace",
+    Path.home() / "openclaw" / "workspace",
+    Path.home() / ".clawdbot" / "workspace",
+    Path.home() / ".moltbot" / "workspace",
+]
+
+def find_workspace():
+    for p in WORKSPACE_CANDIDATES:
+        if (p / "memory").exists():
+            return p
+    # Fallback: check if memory/ exists relative to skill location
+    for parent in [SKILL_DIR.parent.parent, SKILL_DIR.parent.parent.parent]:
+        if (parent / "memory").exists():
+            return parent
+    return WORKSPACE_CANDIDATES[0]  # default
+
+WORKSPACE = find_workspace()
+MEMORY_DIR = WORKSPACE / "memory"
+
+# ─── Personality Keywords ────────────────────────────────────────────────
+
+PERSONALITY_KEYWORDS = {
+    "coder": [
+        "code", "script", "function", "debug", "git", "deploy", "python",
+        "bash", "error", "api", "npm", "docker", "server", "compile",
+        "variable", "class", "import", "repo", "commit", "merge", "branch",
+        "test", "bug", "fix", "refactor", "terminal", "cli", "sdk",
+    ],
+    "writer": [
+        "write", "article", "blog", "draft", "edit", "post", "story",
+        "content", "essay", "paragraph", "summary", "publish", "headline",
+        "tone", "narrative", "outline", "copywriting", "newsletter",
+    ],
+    "analyst": [
+        "data", "chart", "analyze", "report", "csv", "database", "query",
+        "metrics", "sql", "excel", "spreadsheet", "statistics", "graph",
+        "dashboard", "kpi", "visualization", "trend", "forecast",
+    ],
+    "creative": [
+        "design", "image", "ui", "color", "layout", "style", "logo",
+        "brand", "pixel", "animation", "figma", "css", "font", "icon",
+        "mockup", "wireframe", "illustration",
+    ],
+}
+
+# ─── Achievement Definitions ─────────────────────────────────────────────
+
+ACHIEVEMENTS = {
+    "first_chat":   {"name": "初次见面",   "emoji": "🥚", "desc": "Pet initialized"},
+    "day_3":        {"name": "三日之缘",   "emoji": "🌱", "desc": "3 consecutive days"},
+    "day_7":        {"name": "七日之约",   "emoji": "🔥", "desc": "7 consecutive days"},
+    "day_30":       {"name": "铁人虾",     "emoji": "🏆", "desc": "30 consecutive days"},
+    "day_100":      {"name": "百日传说",   "emoji": "👑", "desc": "100 consecutive days"},
+    "night_owl":    {"name": "夜猫子",     "emoji": "🦉", "desc": "5+ late night sessions"},
+    "code_master":  {"name": "代码大师",   "emoji": "💻", "desc": "Coder personality > 0.8"},
+    "wordsmith":    {"name": "妙笔生花",   "emoji": "✍️",  "desc": "Writer personality > 0.8"},
+    "data_wizard":  {"name": "数据巫师",   "emoji": "📊", "desc": "Analyst personality > 0.8"},
+    "chatterbox":   {"name": "话痨虾",     "emoji": "💬", "desc": "500+ total conversations"},
+    "comeback":     {"name": "浪子回头",   "emoji": "🔄", "desc": "Return after 14+ days"},
+}
+
+# ─── Core Functions ──────────────────────────────────────────────────────
+
+def scan_memory_logs():
+    """Scan memory/ directory for daily log files and extract stats."""
+    logs = []
+    
+    if not MEMORY_DIR.exists():
+        return logs
+    
+    date_pattern = re.compile(r"(\d{4}-\d{2}-\d{2})\.md$")
+    
+    for f in sorted(MEMORY_DIR.glob("*.md")):
+        match = date_pattern.search(f.name)
+        if match:
+            date_str = match.group(1)
+            try:
+                date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                content = f.read_text(encoding="utf-8", errors="ignore")
+                logs.append({
+                    "date": date,
+                    "file": str(f),
+                    "chars": len(content),
+                    "content_lower": content.lower(),
+                })
+            except (ValueError, OSError):
+                continue
+    
+    return logs
+
+
+def calculate_xp(logs):
+    """Calculate total XP from log files."""
+    total_xp = 0
+    
+    for log in logs:
+        # Base XP per day
+        base = 10
+        # Bonus for content length (1 per 100 chars, max 50)
+        content_bonus = min(log["chars"] // 100, 50)
+        total_xp += base + content_bonus
+    
+    # Streak bonus
+    streak = calculate_streak(logs)
+    streak_bonus = streak * 2
+    total_xp += streak_bonus
+    
+    return total_xp
+
+
+def calculate_streak(logs):
+    """Calculate current consecutive day streak."""
+    if not logs:
+        return 0
+    
+    today = datetime.now().date()
+    dates = sorted(set(log["date"] for log in logs), reverse=True)
+    
+    # Check if today or yesterday has a log (allow 1 day grace)
+    if dates[0] < today - timedelta(days=1):
+        return 0
+    
+    streak = 1
+    for i in range(len(dates) - 1):
+        if (dates[i] - dates[i + 1]).days == 1:
+            streak += 1
+        else:
+            break
+    
+    return streak
+
+
+def calculate_personality(logs):
+    """Analyze log content to determine personality profile."""
+    scores = {k: 0 for k in PERSONALITY_KEYWORDS}
+    total_words = 0
+    
+    for log in logs:
+        content = log["content_lower"]
+        for dimension, keywords in PERSONALITY_KEYWORDS.items():
+            for kw in keywords:
+                count = content.count(kw)
+                scores[dimension] += count
+                total_words += count
+    
+    # Also calculate "hustle" based on usage frequency
+    if logs:
+        days_span = max((logs[-1]["date"] - logs[0]["date"]).days, 1)
+        usage_rate = len(logs) / days_span
+        scores["hustle"] = int(usage_rate * 100)
+        total_words += scores["hustle"]
+    else:
+        scores["hustle"] = 0
+    
+    # Normalize to 0.0-1.0
+    if total_words > 0:
+        max_score = max(scores.values()) if max(scores.values()) > 0 else 1
+        normalized = {k: round(min(v / max_score, 1.0), 2) for k, v in scores.items()}
+    else:
+        normalized = {k: 0.0 for k in scores}
+    
+    return normalized
+
+
+def calculate_mood(logs):
+    """Determine pet mood based on absence days."""
+    if not logs:
+        return "frozen", 999
+    
+    today = datetime.now().date()
+    last_log = max(log["date"] for log in logs)
+    days_absent = (today - last_log).days
+    
+    if days_absent <= 0:
+        return "energetic", 0
+    elif days_absent <= 3:
+        return "bored", days_absent
+    elif days_absent <= 7:
+        return "slacking", days_absent
+    elif days_absent <= 14:
+        return "hibernating", days_absent
+    elif days_absent <= 30:
+        return "dusty", days_absent
+    else:
+        return "frozen", days_absent
+
+
+def get_primary_personality(personality):
+    """Get the dominant personality tag."""
+    if not personality or all(v == 0 for v in personality.values()):
+        return "neutral"
+    return max(personality, key=personality.get)
+
+
+PERSONALITY_LABELS = {
+    "coder": "🔧 技术宅",
+    "writer": "📝 文艺虾",
+    "analyst": "📊 学霸虾",
+    "creative": "🎨 创意虾",
+    "hustle": "⚡ 卷王虾",
+    "neutral": "🦞 萌新虾",
+}
+
+MOOD_LABELS = {
+    "energetic":   "✨ 精力充沛",
+    "bored":       "😴 有点无聊",
+    "slacking":    "🛋️ 摸鱼模式",
+    "hibernating": "😪 冬眠中",
+    "dusty":       "🏚️ 蒙尘",
+    "frozen":      "❄️ 冰封",
+}
+
+MOOD_MESSAGES = {
+    "energetic":   "今天也一起加油！⌨️🦞",
+    "bored":       "主人去哪了... 🥱🦞",
+    "slacking":    "反正主人也不在，先摸会鱼 🛋️🦞",
+    "hibernating": "zzZ... zzZ... 😴🕸️🦞",
+    "dusty":       "这里好安静啊... 🏚️🦞",
+    "frozen":      "...... ❄️🦞",
+}
+
+
+def xp_to_level(xp):
+    """Convert total XP to level."""
+    return max(1, int(math.floor(math.sqrt(xp / 10))))
+
+
+def level_to_stage(level):
+    """Map level to growth stage."""
+    if level <= 5:
+        return "baby"
+    elif level <= 15:
+        return "teen"
+    elif level <= 30:
+        return "adult"
+    else:
+        return "legend"
+
+
+def get_accessories(personality, stage):
+    """Determine accessories based on personality and stage."""
+    primary = get_primary_personality(personality)
+    accessories = []
+    
+    if stage in ("teen", "adult", "legend"):
+        acc_map = {
+            "coder": ["glasses", "tiny_laptop"],
+            "writer": ["scarf", "pen"],
+            "analyst": ["hat", "chart"],
+            "creative": ["beret", "palette"],
+            "hustle": ["headband", "lightning"],
+            "neutral": [],
+        }
+        accessories = acc_map.get(primary, [])
+    
+    if stage == "legend":
+        accessories.append("golden_aura")
+    
+    return accessories
+
+
+def check_achievements(state, logs, streak):
+    """Check and unlock achievements."""
+    unlocked = set(state.get("achievements", []))
+    personality = state.get("personality", {})
+    
+    # First chat
+    unlocked.add("first_chat")
+    
+    # Streak achievements
+    if streak >= 3:
+        unlocked.add("day_3")
+    if streak >= 7:
+        unlocked.add("day_7")
+    if streak >= 30:
+        unlocked.add("day_30")
+    if streak >= 100:
+        unlocked.add("day_100")
+    
+    # Personality achievements
+    if personality.get("coder", 0) > 0.8:
+        unlocked.add("code_master")
+    if personality.get("writer", 0) > 0.8:
+        unlocked.add("wordsmith")
+    if personality.get("analyst", 0) > 0.8:
+        unlocked.add("data_wizard")
+    
+    # Total conversations
+    if len(logs) >= 500:
+        unlocked.add("chatterbox")
+    
+    # Night owl — check for late-night content patterns
+    night_count = 0
+    for log in logs:
+        if any(kw in log["content_lower"] for kw in ["midnight", "凌晨", "late night", "3am", "2am", "1am"]):
+            night_count += 1
+    if night_count >= 5:
+        unlocked.add("night_owl")
+    
+    # Comeback
+    prev_absent = state.get("max_absence_days", 0)
+    _, current_absent = calculate_mood(logs)
+    if prev_absent >= 14 and current_absent <= 1:
+        unlocked.add("comeback")
+    
+    return sorted(list(unlocked))
+
+
+# ─── Commands ────────────────────────────────────────────────────────────
+
+def cmd_init(name="CrabPet"):
+    """Initialize a new pet."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    state = {
+        "name": name,
+        "level": 1,
+        "xp": 0,
+        "personality": {
+            "coder": 0.0,
+            "writer": 0.0,
+            "analyst": 0.0,
+            "creative": 0.0,
+            "hustle": 0.0,
+        },
+        "mood": "energetic",
+        "days_absent": 0,
+        "max_absence_days": 0,
+        "appearance": {
+            "stage": "baby",
+            "accessories": [],
+            "primary_color": "#FF6B4A",
+        },
+        "stats": {
+            "total_log_days": 0,
+            "streak_days": 0,
+            "max_streak": 0,
+            "first_log": None,
+            "last_log": None,
+        },
+        "achievements": ["first_chat"],
+        "born": datetime.now().strftime("%Y-%m-%d"),
+        "last_updated": datetime.now().isoformat(),
+    }
+    
+    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    
+    result = {
+        "action": "init",
+        "pet_name": name,
+        "message": f"🥚 {name} 诞生了！你的 AI 宠物龙虾开始了它的冒险之旅。",
+        "state": state,
+    }
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return result
+
+
+def cmd_status():
+    """Calculate and return current pet status."""
+    # Load existing state or init
+    if STATE_FILE.exists():
+        state = json.loads(STATE_FILE.read_text())
+    else:
+        cmd_init()
+        state = json.loads(STATE_FILE.read_text())
+    
+    # Scan logs
+    logs = scan_memory_logs()
+    
+    # Calculate everything
+    total_xp = calculate_xp(logs)
+    level = xp_to_level(total_xp)
+    streak = calculate_streak(logs)
+    personality = calculate_personality(logs)
+    mood, days_absent = calculate_mood(logs)
+    stage = level_to_stage(level)
+    accessories = get_accessories(personality, stage)
+    primary_pers = get_primary_personality(personality)
+    
+    # Track max absence for comeback achievement
+    prev_max_absence = state.get("max_absence_days", 0)
+    max_absence = max(prev_max_absence, days_absent)
+    
+    # Update state
+    state.update({
+        "level": level,
+        "xp": total_xp,
+        "xp_next": (level + 1) ** 2 * 10,
+        "personality": personality,
+        "primary_personality": primary_pers,
+        "personality_label": PERSONALITY_LABELS.get(primary_pers, "🦞 萌新虾"),
+        "mood": mood,
+        "mood_label": MOOD_LABELS.get(mood, "🦞"),
+        "mood_message": MOOD_MESSAGES.get(mood, "..."),
+        "days_absent": days_absent,
+        "max_absence_days": max_absence,
+        "appearance": {
+            "stage": stage,
+            "accessories": accessories,
+            "primary_color": "#FF6B4A",
+        },
+        "stats": {
+            "total_log_days": len(logs),
+            "streak_days": streak,
+            "max_streak": max(streak, state.get("stats", {}).get("max_streak", 0)),
+            "first_log": str(logs[0]["date"]) if logs else None,
+            "last_log": str(logs[-1]["date"]) if logs else None,
+        },
+        "last_updated": datetime.now().isoformat(),
+    })
+    
+    # Check achievements
+    state["achievements"] = check_achievements(state, logs, streak)
+    
+    # Check for new achievements
+    old_achievements = set(json.loads(STATE_FILE.read_text()).get("achievements", []))
+    new_achievements = set(state["achievements"]) - old_achievements
+    
+    # Save
+    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    
+    # Build response
+    result = {
+        "action": "status",
+        "pet_name": state["name"],
+        "level": level,
+        "xp": total_xp,
+        "xp_next": state["xp_next"],
+        "stage": stage,
+        "personality_label": state["personality_label"],
+        "personality_scores": personality,
+        "mood_label": state["mood_label"],
+        "mood_message": state["mood_message"],
+        "days_absent": days_absent,
+        "streak": streak,
+        "total_days": len(logs),
+        "achievements_count": f"{len(state['achievements'])}/{len(ACHIEVEMENTS)}",
+        "achievements": state["achievements"],
+        "accessories": accessories,
+    }
+    
+    if new_achievements:
+        result["new_achievements"] = [
+            {"id": a, **ACHIEVEMENTS[a]} for a in new_achievements if a in ACHIEVEMENTS
+        ]
+        result["achievement_message"] = "🎉 解锁新成就！" + " ".join(
+            f"{ACHIEVEMENTS[a]['emoji']} {ACHIEVEMENTS[a]['name']}" 
+            for a in new_achievements if a in ACHIEVEMENTS
+        )
+    
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return result
+
+
+def cmd_achievements():
+    """List all achievements with unlock status."""
+    if STATE_FILE.exists():
+        state = json.loads(STATE_FILE.read_text())
+    else:
+        state = {"achievements": []}
+    
+    unlocked = set(state.get("achievements", []))
+    
+    result = {
+        "action": "achievements",
+        "unlocked_count": len(unlocked),
+        "total_count": len(ACHIEVEMENTS),
+        "achievements": [],
+    }
+    
+    for aid, info in ACHIEVEMENTS.items():
+        result["achievements"].append({
+            "id": aid,
+            "name": info["name"],
+            "emoji": info["emoji"],
+            "desc": info["desc"],
+            "unlocked": aid in unlocked,
+        })
+    
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return result
+
+
+def cmd_card():
+    """Generate a pet card image (text-based fallback if Pillow not available)."""
+    # Get current status first
+    if not STATE_FILE.exists():
+        cmd_init()
+    
+    state = json.loads(STATE_FILE.read_text())
+    
+    # Try to update status
+    try:
+        import io
+        logs = scan_memory_logs()
+        total_xp = calculate_xp(logs)
+        level = xp_to_level(total_xp)
+        personality = calculate_personality(logs)
+        primary_pers = get_primary_personality(personality)
+        mood, days_absent = calculate_mood(logs)
+    except Exception:
+        level = state.get("level", 1)
+        primary_pers = state.get("primary_personality", "neutral")
+        mood = state.get("mood", "energetic")
+        days_absent = state.get("days_absent", 0)
+    
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    card_path = OUTPUT_DIR / "pet_card.png"
+    
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        
+        # Card dimensions
+        W, H = 400, 500
+        img = Image.new("RGB", (W, H), "#0d0d1a")
+        draw = ImageDraw.Draw(img)
+        
+        # Border
+        draw.rectangle([2, 2, W-3, H-3], outline="#FF6B4A", width=2)
+        
+        # Header
+        draw.rectangle([0, 0, W, 60], fill="#111128")
+        try:
+            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 20)
+            font_body = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 11)
+        except OSError:
+            font_title = ImageFont.load_default()
+            font_body = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+        
+        draw.text((W//2, 30), f"CRABPET CARD", fill="#FF6B4A", font=font_title, anchor="mm")
+        
+        # Pet sprite area (simplified pixel art)
+        sprite_y = 80
+        sprite_size = 8
+        # Draw a simple pixel crab
+        crab_pixels = [
+            "..RR....RR..",
+            "..RR....RR..",
+            ".RRRR.RRRR..",
+            ".ROOORROOR..",
+            ".ROOOOOOOR..",
+            ".ROWOOOWOR..",
+            ".ROOOOOOOR..",
+            ".ROOMMMOOR..",
+            "..RRRRRRRR..",
+            ".RR.RR.RR...",
+        ]
+        color_map = {"R": "#D4432F", "O": "#FF7B54", "W": "#FFFFFF", "M": "#FF4757"}
+        
+        if mood == "frozen":
+            color_map = {"R": "#5B9BD5", "O": "#A0C4E8", "W": "#E8E8E8", "M": "#7BB8DE"}
+        elif mood in ("dusty", "hibernating"):
+            color_map = {"R": "#6B5B4F", "O": "#8B7B6F", "W": "#CCCCCC", "M": "#7B6B5F"}
+        
+        cx = W // 2 - len(crab_pixels[0]) * sprite_size // 2
+        for row_idx, row in enumerate(crab_pixels):
+            for col_idx, ch in enumerate(row):
+                if ch in color_map:
+                    x = cx + col_idx * sprite_size
+                    y = sprite_y + row_idx * sprite_size
+                    draw.rectangle([x, y, x + sprite_size - 1, y + sprite_size - 1], fill=color_map[ch])
+        
+        # Pet name and info
+        info_y = sprite_y + len(crab_pixels) * sprite_size + 20
+        name = state.get("name", "CrabPet")
+        pers_label = PERSONALITY_LABELS.get(primary_pers, "Neutral")
+        mood_label = MOOD_LABELS.get(mood, "...")
+        streak = state.get("stats", {}).get("streak_days", 0)
+        total_days = state.get("stats", {}).get("total_log_days", 0)
+        born = state.get("born", "???")
+        
+        draw.text((W//2, info_y), name, fill="#FF6B4A", font=font_title, anchor="mm")
+        info_y += 30
+        
+        draw.text((W//2, info_y), f"Lv.{level}  |  {pers_label}", fill="#CCCCCC", font=font_body, anchor="mm")
+        info_y += 25
+        draw.text((W//2, info_y), f"{mood_label}", fill="#999999", font=font_body, anchor="mm")
+        info_y += 35
+        
+        # Stats box
+        draw.rectangle([30, info_y, W-30, info_y + 80], fill="#111128", outline="#222222")
+        stats_items = [
+            (f"Days: {total_days}", 100),
+            (f"Streak: {streak}d", 200),
+            (f"XP: {state.get('xp', 0)}", 300),
+        ]
+        for text, x in stats_items:
+            draw.text((x, info_y + 40), text, fill="#FF6B4A", font=font_body, anchor="mm")
+        
+        info_y += 100
+        
+        # Achievements
+        unlocked = state.get("achievements", [])
+        ach_text = " ".join(ACHIEVEMENTS[a]["emoji"] for a in unlocked if a in ACHIEVEMENTS)
+        if ach_text:
+            draw.text((W//2, info_y), ach_text, fill="#FFFFFF", font=font_title, anchor="mm")
+        
+        info_y += 40
+        
+        # Footer
+        draw.rectangle([30, H - 50, W - 30, H - 15], outline="#333333")
+        draw.text((W//2, H - 32), "clawhub install crabpet", fill="#FF6B4A", font=font_small, anchor="mm")
+        
+        # Save
+        img.save(str(card_path), "PNG")
+        
+        result = {
+            "action": "card",
+            "card_path": str(card_path),
+            "message": f"Pet card generated at {card_path}",
+            "share_text": f"My AI pet {name} is Lv.{level}, personality: {pers_label}! Get yours: clawhub install crabpet",
+        }
+    
+    except ImportError:
+        # Pillow not installed — generate text card
+        card_text = f"""
+╔══════════════════════════════════╗
+║       🦞 CRABPET CARD 🦞        ║
+╠══════════════════════════════════╣
+║                                  ║
+║   Name: {state.get('name', 'CrabPet'):<24s}║
+║   Level: {level:<23d}║
+║   Type: {PERSONALITY_LABELS.get(primary_pers, '🦞'):<24s}║
+║   Mood: {MOOD_LABELS.get(mood, '...'):<24s}║
+║                                  ║
+║   Streak: {state.get('stats',{}).get('streak_days',0)} days{' ' * 18}║
+║   Total:  {state.get('stats',{}).get('total_log_days',0)} days{' ' * 18}║
+║                                  ║
+║   clawhub install crabpet        ║
+╚══════════════════════════════════╝
+"""
+        card_path = OUTPUT_DIR / "pet_card.txt"
+        card_path.write_text(card_text)
+        
+        result = {
+            "action": "card",
+            "card_path": str(card_path),
+            "fallback": "text",
+            "message": "Pillow not installed. Generated text card. Install Pillow for PNG: pip install Pillow",
+            "card_text": card_text,
+        }
+    
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return result
+
+
+# ─── Main ────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"error": "Usage: pet_engine.py <init|status|card|achievements> [--name NAME]"}))
+        sys.exit(1)
+    
+    command = sys.argv[1].lower()
+    
+    if command == "init":
+        name = "CrabPet"
+        if "--name" in sys.argv:
+            idx = sys.argv.index("--name")
+            if idx + 1 < len(sys.argv):
+                name = sys.argv[idx + 1]
+        cmd_init(name)
+    
+    elif command == "status":
+        cmd_status()
+    
+    elif command == "card":
+        cmd_card()
+    
+    elif command == "achievements":
+        cmd_achievements()
+    
+    else:
+        print(json.dumps({"error": f"Unknown command: {command}"}))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
