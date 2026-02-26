@@ -16,6 +16,7 @@ import sys
 import math
 import random
 import re
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -234,6 +235,16 @@ PERSONALITY_LABELS = {
     "neutral": "🦞 萌新虾",
 }
 
+# Text-only labels for PNG card rendering (no emoji, avoids font issues)
+PERSONALITY_LABELS_TEXT = {
+    "coder": "技术宅",
+    "writer": "文艺虾",
+    "analyst": "学霸虾",
+    "creative": "创意虾",
+    "hustle": "卷王虾",
+    "neutral": "萌新虾",
+}
+
 MOOD_LABELS = {
     "energetic":   "✨ 精力充沛",
     "bored":       "😴 有点无聊",
@@ -241,6 +252,15 @@ MOOD_LABELS = {
     "hibernating": "😪 冬眠中",
     "dusty":       "🏚️ 蒙尘",
     "frozen":      "❄️ 冰封",
+}
+
+MOOD_LABELS_TEXT = {
+    "energetic":   "精力充沛",
+    "bored":       "有点无聊",
+    "slacking":    "摸鱼模式",
+    "hibernating": "冬眠中",
+    "dusty":       "蒙尘",
+    "frozen":      "冰封",
 }
 
 MOOD_MESSAGES = {
@@ -567,14 +587,28 @@ def cmd_card():
         
         # Header
         draw.rectangle([0, 0, W, 60], fill="#111128")
-        try:
-            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 20)
-            font_body = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 11)
-        except OSError:
-            font_title = ImageFont.load_default()
-            font_body = ImageFont.load_default()
-            font_small = ImageFont.load_default()
+        # Font loading: prefer WenQuanYi (CJK support), fall back to DejaVu
+        CJK_FONT_PATHS = [
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        ]
+        LATIN_FONT_PATHS = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        ]
+
+        def find_font(paths, size):
+            for p in paths:
+                try:
+                    return ImageFont.truetype(p, size)
+                except OSError:
+                    continue
+            return ImageFont.load_default()
+
+        font_title = find_font(CJK_FONT_PATHS + LATIN_FONT_PATHS, 20)
+        font_body = find_font(CJK_FONT_PATHS + LATIN_FONT_PATHS, 14)
+        font_small = find_font(CJK_FONT_PATHS + LATIN_FONT_PATHS, 11)
         
         draw.text((W//2, 30), f"CRABPET CARD", fill="#FF6B4A", font=font_title, anchor="mm")
         
@@ -609,21 +643,21 @@ def cmd_card():
                     y = sprite_y + row_idx * sprite_size
                     draw.rectangle([x, y, x + sprite_size - 1, y + sprite_size - 1], fill=color_map[ch])
         
-        # Pet name and info
+        # Pet name and info (use text-only labels to avoid emoji rendering issues)
         info_y = sprite_y + len(crab_pixels) * sprite_size + 20
         name = state.get("name", "CrabPet")
-        pers_label = PERSONALITY_LABELS.get(primary_pers, "Neutral")
-        mood_label = MOOD_LABELS.get(mood, "...")
+        pers_label = PERSONALITY_LABELS_TEXT.get(primary_pers, "Neutral")
+        mood_label = MOOD_LABELS_TEXT.get(mood, "...")
         streak = state.get("stats", {}).get("streak_days", 0)
         total_days = state.get("stats", {}).get("total_log_days", 0)
         born = state.get("born", "???")
-        
+
         draw.text((W//2, info_y), name, fill="#FF6B4A", font=font_title, anchor="mm")
         info_y += 30
-        
+
         draw.text((W//2, info_y), f"Lv.{level}  |  {pers_label}", fill="#CCCCCC", font=font_body, anchor="mm")
         info_y += 25
-        draw.text((W//2, info_y), f"{mood_label}", fill="#999999", font=font_body, anchor="mm")
+        draw.text((W//2, info_y), mood_label, fill="#999999", font=font_body, anchor="mm")
         info_y += 35
         
         # Stats box
@@ -638,11 +672,15 @@ def cmd_card():
         
         info_y += 100
         
-        # Achievements
+        # Achievements (use text names instead of emoji for PNG rendering)
         unlocked = state.get("achievements", [])
-        ach_text = " ".join(ACHIEVEMENTS[a]["emoji"] for a in unlocked if a in ACHIEVEMENTS)
-        if ach_text:
-            draw.text((W//2, info_y), ach_text, fill="#FFFFFF", font=font_title, anchor="mm")
+        ach_names = [ACHIEVEMENTS[a]["name"] for a in unlocked if a in ACHIEVEMENTS]
+        if ach_names:
+            ach_text = " | ".join(ach_names[:4])  # limit to 4 to fit width
+            draw.text((W//2, info_y), ach_text, fill="#FFFFFF", font=font_body, anchor="mm")
+            if len(ach_names) > 4:
+                info_y += 20
+                draw.text((W//2, info_y), f"+{len(ach_names) - 4} more", fill="#666666", font=font_small, anchor="mm")
         
         info_y += 40
         
