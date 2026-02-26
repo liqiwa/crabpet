@@ -587,8 +587,14 @@ def cmd_card():
         
         # Header
         draw.rectangle([0, 0, W, 60], fill="#111128")
-        # Font loading: prefer WenQuanYi (CJK support), fall back to DejaVu
+        # Font loading: prefer CJK fonts, with cross-platform fallback
         CJK_FONT_PATHS = [
+            # macOS
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+            # Linux
             "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
